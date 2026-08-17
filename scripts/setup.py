@@ -192,8 +192,12 @@ def setup_dataset() -> str:
 # ── Online evaluators ──────────────────────────────────────────────────────────
 
 def get_project_id(ls_client, project_name: str) -> str:
-    projects = list(ls_client.list_projects())
-    project = next((p for p in projects if p.name == project_name), None)
+    # name= filters server-side; an unfiltered list_projects() walks every
+    # project in the workspace and times out once that list gets large.
+    project = next(
+        (p for p in ls_client.list_projects(name=project_name) if p.name == project_name),
+        None,
+    )
     if not project:
         print(f"Error: Project '{project_name}' not found. Generate some traces first.")
         sys.exit(1)

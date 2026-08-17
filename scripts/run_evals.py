@@ -117,8 +117,12 @@ def setup_online_eval():
     from langsmith import Client
     ls_client = Client()
 
-    projects = list(ls_client.list_projects())
-    project = next((p for p in projects if p.name == PROJECT_NAME), None)
+    # name= filters server-side; an unfiltered list_projects() walks every
+    # project in the workspace and times out once that list gets large.
+    project = next(
+        (p for p in ls_client.list_projects(name=PROJECT_NAME) if p.name == PROJECT_NAME),
+        None,
+    )
     if not project:
         print(f"Warning: Project '{PROJECT_NAME}' not found. Generate some traces first.")
         return
