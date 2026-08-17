@@ -80,7 +80,7 @@ Runs 11 single-turn queries and 1 multi-turn threaded conversation through the b
 
 **6. Add GitHub secrets** (for CI/CD)
 
-In your fork: Settings → Secrets → Actions → add `ANTHROPIC_API_KEY`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, and `LANGSMITH_WORKSPACE_ID`.
+In your fork: Settings → Secrets → Actions → add `ANTHROPIC_API_KEY`, `LANGSMITH_API_KEY_GATEWAY`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, and `LANGSMITH_WORKSPACE_ID`.
 
 > **Important:** When pasting secrets, make sure there are no trailing newlines or spaces.
 
@@ -178,7 +178,8 @@ Six online evaluators are registered by `python -m scripts.setup`: `security_adv
 `.github/workflows/evals.yml` runs automatically on every PR to `main`.
 
 Add these secrets to your repo (Settings → Secrets → Actions):
-- `ANTHROPIC_API_KEY`
+- `ANTHROPIC_API_KEY` — the gateway key (`lsv2_sk_…`) the LLM-as-judge evaluator uses
+- `LANGSMITH_API_KEY_GATEWAY` — the gateway key `utils/models.py` routes the agent through
 - `LANGSMITH_API_KEY`
 - `LANGSMITH_PROJECT`
 - `LANGSMITH_WORKSPACE_ID`
