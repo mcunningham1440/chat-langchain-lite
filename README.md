@@ -64,10 +64,11 @@ LANGSMITH_TRACING=true
 python -m scripts.setup
 ```
 
-This does three things in one command:
+This does four things in one command:
 1. **Creates the LangSmith project** by sending one trace (required before online evaluators can be registered)
 2. **Creates the dataset** `chat-lc-lite-scope-<your-name>` with 3 curated test cases, then tags that version as `baseline` in LangSmith
 3. **Creates 6 online evaluators** in the LangSmith Evaluators UI at 100% sampling rate — every future trace is automatically scored for `security_advice`, `scope_adherence`, `tool_usage`, `response_completeness`, `professional_tone`, and `factual_accuracy`. Their run rule IDs are saved to `.demo_state.json` so cleanup can tell them apart from evaluators Engine adds.
+4. **Creates the annotation queue** `chat-lc-lite-review-<your-name>` used in demo step 4, seeded with 👎-rated traces (or the 10 most recent, if nobody has voted yet). Its rubric covers `user_score` and `factual_accuracy`, and its default dataset is wired to the demo dataset so corrected examples are one click from becoming offline eval cases.
 
 Only needs to be run once. Between demos, run `python -m scripts.cleanup` instead.
 
@@ -97,7 +98,7 @@ In LangSmith Engine, connect your LangSmith project (`LANGSMITH_PROJECT`) and yo
 ### Before the demo
 
 ```bash
-# One-shot setup: creates dataset, sets up online evaluators
+# One-shot setup: creates dataset, online evaluators, annotation queue
 python -m scripts.setup
 
 # Generate more traces including threads
@@ -116,7 +117,7 @@ port powers streaming, thread history, and feedback.
 1. Show Chat LangChain Lite UI — ask questions (concept lookups, setup guides, security advice, etc.); rate responses 👍/👎 to send feedback to LangSmith
 2. Show traces in LangSmith with online eval scores (`security_advice`, `scope_adherence`, etc.)
 3. Engine analyzes traces and identifies root causes across prompt and code
-4. Add Engine-suggested offline examples — show ability to edit in annotation queue
+4. Add Engine-suggested offline examples — show ability to edit in the `chat-lc-lite-review-<your-name>` annotation queue, then send the corrected example to the dataset
 5. Engine opens a PR on your fork
 6. GitHub Actions runs evals on main (before experiment) and the PR branch (after experiment) — after scores pass ✅
 7. Merge the PR
@@ -151,13 +152,13 @@ LangGraph SDK on loopback — it never imports the graph directly.
 
 | Script | What it does |
 |--------|-------------|
-| `python -m scripts.setup` | One-shot setup: creates dataset and creates 6 online evaluators |
+| `python -m scripts.setup` | One-shot setup: creates dataset, 6 online evaluators, and the annotation queue |
 | `python -m scripts.generate_traces` | Runs 11 single-turn queries + 1 multi-turn thread through the buggy agent |
 | `python -m scripts.run_evals` | Runs offline evals against the dataset and prints scores |
 | `python -m scripts.run_evals --skip-dataset` | Re-runs evals against existing dataset (used in CI) |
 | `python -m scripts.run_evals --threshold 0.7` | Exits with code 1 if scores < 0.7 (used in CI) |
 | `python -m scripts.cleanup` | Resets demo to clean state — see Cleanup section |
-| `python -m scripts.cleanup --full` | Same, plus deletes the LangSmith project (so Engine sees a fresh project on the next demo). Re-run `scripts.setup` after. |
+| `python -m scripts.cleanup --full` | Same, plus deletes the LangSmith project and annotation queue (so Engine sees a fresh project on the next demo). Re-run `scripts.setup` after. |
 | `uv run langgraph dev` | Start the graph server with the Chat LangChain Lite UI mounted on it (http://localhost:2024/) |
 
 ## Evaluators
@@ -217,7 +218,7 @@ evals/
 └── evaluators.py     # 2 LLM-as-judge offline evaluators (used in CI)
 
 scripts/
-├── setup.py          # one-shot setup: dataset + online evaluators + Context Hub
+├── setup.py          # one-shot setup: dataset + online evaluators + annotation queue + Context Hub
 ├── generate_traces.py    # populate LangSmith with extra traces and threads
 ├── run_evals.py          # offline evals + CI threshold check
 └── cleanup.py            # resets demo to clean state after presentation
@@ -243,20 +244,21 @@ Run after the demo to reset everything for the next presenter:
 python -m scripts.cleanup
 ```
 
-This does five things:
+This does six things:
 1. **Resets dataset to original 3 examples** — deletes all examples and re-uploads the canonical 3, removing anything Engine added
 2. **Deletes CI/Engine experiments** — keeps the `baseline-*` seed experiments from `setup.py` (the Haiku-vs-Sonnet "before" reference); CI/CD regenerates before/after experiments on every PR
 3. **Removes Engine-added online evaluators** — uses saved run rule IDs from `.demo_state.json` to delete only evaluators Engine added, leaving the 5 from `setup.py` in place
-4. **Re-seeds Context Hub to the buggy baseline** — re-pushes the seed `AGENTS.md` and demo skills, restoring the buggy prompt if it was fixed in the Context Hub UI during the demo (a code/dataset reset can't touch Context Hub)
-5. **Resets main to the `baseline` tag** — force-resets to remove Engine's merged PR, restoring the buggy agent state
+4. **Resets the annotation queue** — empties it and re-seeds from 👎-rated traces, since reviewing an item during the demo marks it done and drains the queue. Feedback left on the traces themselves is kept; only queue membership is reset.
+5. **Re-seeds Context Hub to the buggy baseline** — re-pushes the seed `AGENTS.md` and demo skills, restoring the buggy prompt if it was fixed in the Context Hub UI during the demo (a code/dataset reset can't touch Context Hub)
+6. **Resets main to the `baseline` tag** — force-resets to remove Engine's merged PR, restoring the buggy agent state
 
 After cleanup, the demo is ready to run again — no need to re-run `setup.py`.
 
-For a **full** reset that also removes the LangSmith project (clearing all traces and Engine's per-project issue state):
+For a **full** reset that also removes the LangSmith project and annotation queue (clearing all traces and Engine's per-project issue state):
 
 ```bash
 python -m scripts.cleanup --full
-python -m scripts.setup         # recreates project, dataset, evaluators
+python -m scripts.setup         # recreates project, dataset, evaluators, queue
 python -m scripts.generate_traces
 ```
 
