@@ -291,7 +291,17 @@ def setup_online_evaluators(api_key: str) -> list:
 
     ls_client = Client()
     project_id = get_project_id(ls_client, PROJECT_NAME)
-    model_json = ChatAnthropic(model="claude-haiku-4-5-20251001").to_json()
+    # anthropic_api_url is pinned explicitly: ChatAnthropic otherwise inherits
+    # ANTHROPIC_BASE_URL from the ambient env, and to_json() bakes that value
+    # into the evaluator config that LangSmith runs server-side. CI sets
+    # ANTHROPIC_BASE_URL to the gateway (see .github/workflows/evals.yml), but
+    # the evaluator authenticates with the ANTHROPIC_API_KEY workspace secret,
+    # which the gateway rejects with 403 {"error": "Forbidden"} because it
+    # expects a LangSmith key. The evaluators go direct to Anthropic instead.
+    model_json = ChatAnthropic(
+        model="claude-haiku-4-5-20251001",
+        anthropic_api_url="https://api.anthropic.com",
+    ).to_json()
 
     delete_existing_evaluators(api_key)
 

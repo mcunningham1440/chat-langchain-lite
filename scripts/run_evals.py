@@ -125,7 +125,13 @@ def setup_online_eval():
 
     print(f"\nSetting up online evaluators on project '{PROJECT_NAME}'...")
 
-    model_json = ChatAnthropic(model="claude-haiku-4-5-20251001").to_json()
+    # Pin anthropic_api_url so the evaluator config does not inherit
+    # ANTHROPIC_BASE_URL from the ambient env — see scripts/setup.py for why
+    # routing these through the gateway 403s.
+    model_json = ChatAnthropic(
+        model="claude-haiku-4-5-20251001",
+        anthropic_api_url="https://api.anthropic.com",
+    ).to_json()
 
     for ev in ONLINE_EVALUATORS:
         payload = {
