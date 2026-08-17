@@ -135,9 +135,14 @@ def delete_engine_evaluators(api_key: str) -> None:
         return
 
     # Get our project ID so we only touch rules scoped to our project
+    # Filter server-side: an unfiltered list_projects() paginates the whole
+    # workspace, which in a shared workspace is thousands of projects and reads
+    # until the socket times out. name= narrows it to one page.
     ls_client = Client()
-    projects = list(ls_client.list_projects())
-    project = next((p for p in projects if p.name == PROJECT_NAME), None)
+    project = next(
+        (p for p in ls_client.list_projects(name=PROJECT_NAME) if p.name == PROJECT_NAME),
+        None,
+    )
     if not project:
         print(f"  Warning: project '{PROJECT_NAME}' not found. Skipping.")
         return
