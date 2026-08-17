@@ -15,7 +15,13 @@ jobs:
     if: contains(github.event.pull_request.labels.*.name, 'run-evals')
     runs-on: ubuntu-latest
     env:
+      # ANTHROPIC_API_KEY is a LangSmith gateway key (lsv2_sk_…), so the
+      # evaluator's Anthropic SDK client needs the gateway base URL too —
+      # without it the SDK hits api.anthropic.com and 401s.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_BASE_URL: https://gateway.smith.langchain.com/anthropic
+      # utils/models.py reads this to route the agent through the gateway.
+      LANGSMITH_API_KEY_GATEWAY: ${{ secrets.LANGSMITH_API_KEY_GATEWAY }}
       LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
       LANGSMITH_PROJECT: ${{ secrets.LANGSMITH_PROJECT }}
       LANGSMITH_WORKSPACE_ID: ${{ secrets.LANGSMITH_WORKSPACE_ID }}
