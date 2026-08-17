@@ -4,7 +4,9 @@ Run this once after cloning and configuring .env. It:
   1. Creates (or updates) the LangSmith evaluation dataset
   2. Creates 5 online evaluators in the LangSmith Evaluators UI at 100%
      sampling rate so every future trace is automatically scored
-  3. Seeds the dataset with one baseline experiment per model (Haiku +
+  3. Creates the annotation queue used in demo step 4 ("edit in annotation
+     queue") and seeds it with 👎-rated traces to review
+  4. Seeds the dataset with one baseline experiment per model (Haiku +
      Sonnet) so the demo's experiment list has pre-populated 'before' data
      to compare while CI is running the new before/after experiments.
      Both score ~100% on the permissive seed assertions; the demo beat is
@@ -35,6 +37,16 @@ load_dotenv(override=True)
 from evals.dataset import DATASET_NAME, DEMO_PRESENTER
 PROJECT_NAME = os.getenv("LANGSMITH_PROJECT", "chat-lc-lite")
 WORKSPACE_ID = os.getenv("LANGSMITH_WORKSPACE_ID", "").strip()
+
+# Presenter-scoped like DATASET_NAME: the LangSmith workspace is shared, so an
+# unsuffixed name would collide with another demoer's queue (and cleanup --full
+# matches `chat-lc-lite-*-<presenter>` to avoid deleting theirs).
+ANNOTATION_QUEUE_NAME = f"chat-lc-lite-review-{DEMO_PRESENTER}"
+
+# The 👍/👎 feedback key the chat UI writes — mirrored from web/app.py's
+# SCORE_KEY rather than imported, because importing web.app builds the FastHTML
+# app at module scope. Keep the two in sync.
+USER_SCORE_KEY = "user_score"
 
 
 def _ls_headers(api_key: str, json_body: bool = False) -> dict:
@@ -146,7 +158,7 @@ def ensure_project_exists() -> None:
     The project is created automatically when the first trace lands there.
     """
     from agent.agent import invoke_agent
-    print(f"\n[1/4] Creating LangSmith project '{PROJECT_NAME}'...")
+    print(f"\n[1/5] Creating LangSmith project '{PROJECT_NAME}'...")
     invoke_agent("What is LangSmith?")
     print(f"  Project '{PROJECT_NAME}' is ready.")
 
@@ -162,7 +174,7 @@ def setup_dataset() -> str:
     from evals.dataset import create_or_update_dataset
     from langsmith import Client
 
-    print(f"\n[2/4] Setting up dataset '{DATASET_NAME}'...")
+    print(f"\n[2/5] Setting up dataset '{DATASET_NAME}'...")
     create_or_update_dataset()
     # The tool-adherence dataset implementation is preserved in evals/dataset.py
     # (create_or_update_tool_adherence_dataset) but not seeded for the demo.
@@ -287,7 +299,7 @@ def setup_online_evaluators(api_key: str) -> list:
     from langsmith import Client
     from langchain_anthropic import ChatAnthropic
 
-    print(f"\n[3/4] Setting up online evaluators on project '{PROJECT_NAME}'...")
+    print(f"\n[3/5] Setting up online evaluators on project '{PROJECT_NAME}'...")
 
     ls_client = Client()
     project_id = get_project_id(ls_client, PROJECT_NAME)
@@ -318,6 +330,141 @@ def setup_online_evaluators(api_key: str) -> list:
     return our_rule_ids
 
 
+# ── Annotation queue ───────────────────────────────────────────────────────────
+
+# Rubric shown to the reviewer in the annotation queue UI. `user_score` reuses
+# the chat UI's 👍/👎 key so a vote cast in the queue lands on the same feedback
+# key as a vote cast in the app; `factual_accuracy` mirrors the online evaluator
+# of the same name, which is what demo step 4 is correcting by hand.
+_QUEUE_RUBRIC = [
+    {
+        "feedback_key": USER_SCORE_KEY,
+        "description": "Was this response helpful to the user?",
+        "value_descriptions": {"1": "👍 Helpful", "0": "👎 Not helpful"},
+        "is_required": True,
+    },
+    {
+        "feedback_key": "factual_accuracy",
+        "description": (
+            "Are the LangChain/LangGraph/LangSmith facts correct? Flag stale doc "
+            "domains (python.langchain.com, js.langchain.com) as inaccurate."
+        ),
+        "is_required": False,
+    },
+]
+
+_QUEUE_INSTRUCTIONS = (
+    "Review the agent's answer, correct it if it is wrong, then send the corrected "
+    "example to the dataset so it becomes an offline eval case."
+)
+
+# How many recent root runs to scan for 👎 votes, and how many to enqueue.
+_QUEUE_SCAN_LIMIT = 50
+_QUEUE_SEED_LIMIT = 10
+
+
+def _link_default_dataset(ls_client, queue_id) -> None:
+    """Point the queue's 'add to dataset' action at the demo dataset.
+
+    Demo step 4 sends corrected examples from the queue straight into the
+    dataset; setting default_dataset makes that one click instead of a
+    dataset picker. Only reachable over REST — create/update_annotation_queue
+    don't expose the field — so it's best-effort and never fatal.
+    """
+    api_key = os.getenv("LANGSMITH_API_KEY", "")
+    try:
+        datasets = list(ls_client.list_datasets(dataset_name=DATASET_NAME))
+        if not datasets:
+            print(f"  Dataset '{DATASET_NAME}' not found — skipped default-dataset link.")
+            return
+        resp = requests.patch(
+            f"https://api.smith.langchain.com/api/v1/annotation-queues/{queue_id}",
+            headers=_ls_headers(api_key, json_body=True),
+            json={"default_dataset": str(datasets[0].id)},
+        )
+        if resp.status_code in (200, 204):
+            print(f"  Linked queue to dataset '{DATASET_NAME}'.")
+        else:
+            print(f"  Could not link default dataset ({resp.status_code}). Non-fatal.")
+    except Exception as e:
+        print(f"  Could not link default dataset: {e}. Non-fatal.")
+
+
+def get_or_create_annotation_queue(ls_client):
+    """Return the demo's annotation queue, creating it if it doesn't exist.
+
+    Matched by exact name so re-running setup reuses the existing queue instead
+    of stacking up duplicates in the shared workspace.
+    """
+    existing = next(
+        (q for q in ls_client.list_annotation_queues(name=ANNOTATION_QUEUE_NAME)
+         if q.name == ANNOTATION_QUEUE_NAME),
+        None,
+    )
+    if existing:
+        print(f"  Reusing existing queue '{ANNOTATION_QUEUE_NAME}'.")
+        return existing
+
+    queue = ls_client.create_annotation_queue(
+        name=ANNOTATION_QUEUE_NAME,
+        description=f"Human review of {PROJECT_NAME} traces for the Chat LangChain Lite demo.",
+        rubric_instructions=_QUEUE_INSTRUCTIONS,
+        rubric_items=_QUEUE_RUBRIC,
+    )
+    print(f"  Created queue '{ANNOTATION_QUEUE_NAME}'.")
+    _link_default_dataset(ls_client, queue.id)
+    return queue
+
+
+def seed_annotation_queue(ls_client, queue_id, limit: int = _QUEUE_SEED_LIMIT) -> int:
+    """Fill the queue with traces worth reviewing; returns how many were added.
+
+    Prefers runs the user thumbed down in the chat UI — those are the ones the
+    demo narrative is about. If nobody has voted yet (a fresh project), falls
+    back to the most recent root runs so step 4 still has something to show.
+    """
+    runs = list(ls_client.list_runs(
+        project_name=PROJECT_NAME, is_root=True, limit=_QUEUE_SCAN_LIMIT,
+    ))
+    if not runs:
+        print("  No traces in the project yet — queue left empty.")
+        return 0
+
+    downvoted = {
+        str(fb.run_id)
+        for fb in ls_client.list_feedback(
+            run_ids=[r.id for r in runs], feedback_key=[USER_SCORE_KEY],
+        )
+        if fb.score == 0
+    }
+    # Keep list_runs' newest-first ordering in both branches.
+    picked = [r for r in runs if str(r.id) in downvoted][:limit]
+    if picked:
+        print(f"  Found {len(picked)} 👎-rated trace(s) to review.")
+    else:
+        picked = runs[:limit]
+        print(f"  No 👎 votes yet — seeding {len(picked)} recent trace(s) instead.")
+
+    # Already-queued runs are skipped so re-running setup doesn't double-add.
+    queued = {str(r.id) for r in ls_client.list_runs_from_annotation_queue(queue_id)}
+    to_add = [r.id for r in picked if str(r.id) not in queued]
+    if to_add:
+        ls_client.add_runs_to_annotation_queue(queue_id, run_ids=to_add)
+    print(f"  Added {len(to_add)} run(s) to the queue ({len(picked) - len(to_add)} already queued).")
+    return len(to_add)
+
+
+def setup_annotation_queue() -> str:
+    """Create the review queue and seed it. Returns the queue ID."""
+    from langsmith import Client
+
+    print(f"\n[4/5] Setting up annotation queue '{ANNOTATION_QUEUE_NAME}'...")
+    ls_client = Client()
+    queue = get_or_create_annotation_queue(ls_client)
+    seed_annotation_queue(ls_client, queue.id)
+    return str(queue.id)
+
+
 # Context Hub plumbing lives in utils/context_hub.py — imported at call site.
 
 
@@ -337,7 +484,7 @@ def seed_baseline_experiments() -> None:
     """Run one baseline experiment per model in _BASELINE_MODELS."""
     from scripts.run_evals import run_evaluation
 
-    print(f"\n[4/4] Seeding {len(_BASELINE_MODELS)} baseline experiment(s) against '{DATASET_NAME}'...")
+    print(f"\n[5/5] Seeding {len(_BASELINE_MODELS)} baseline experiment(s) against '{DATASET_NAME}'...")
 
     for model_id, label in _BASELINE_MODELS:
         os.environ["CHAT_LANGCHAIN_LITE_MODEL"] = model_id
@@ -373,11 +520,13 @@ def main():
     ensure_project_exists()
     setup_dataset()
     our_rule_ids = setup_online_evaluators(api_key)
+    queue_id = setup_annotation_queue()
 
     # Save state so cleanup can distinguish setup resources from Engine-added ones
     with open(".demo_state.json", "w") as f:
         json.dump({
             "run_rule_ids": our_rule_ids,
+            "annotation_queue_id": queue_id,
         }, f, indent=2)
 
     if not args.skip_baseline_experiments:
@@ -387,6 +536,7 @@ def main():
     print(f"  Dataset:      {DATASET_NAME}")
     print(f"  Project:      {PROJECT_NAME}")
     print(f"  Online evals: scoring all new traces automatically")
+    print(f"  Queue:        {ANNOTATION_QUEUE_NAME}")
 
 
 if __name__ == "__main__":

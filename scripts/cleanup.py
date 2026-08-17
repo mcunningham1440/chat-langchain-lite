@@ -4,12 +4,14 @@ Resets the demo to a clean state so it can be run again without re-running setup
   1. Resets dataset to the original 3 examples (deletes Engine-added examples)
   2. Deletes CI/Engine experiments (keeps the baseline-* seeds from setup.py)
   3. Removes Engine-added online evaluators (keeps the 5 registered by setup.py)
-  4. Re-seeds Context Hub (AGENTS.md + demo skills) to the buggy baseline,
+  4. Empties and re-seeds the annotation queue (clears any reviews done during
+     the demo, so step 4 has unreviewed traces again)
+  5. Re-seeds Context Hub (AGENTS.md + demo skills) to the buggy baseline,
      restoring the prompt if it was fixed in the Context Hub UI during the demo
-  5. Force-resets main back to the 'baseline' tag (removes Engine's merged PR)
+  6. Force-resets main back to the 'baseline' tag (removes Engine's merged PR)
 
-Optional: --full also deletes the LangSmith project entirely (clears all
-traces and Engine's per-project issue state). After a full reset, re-run
+Optional: --full also deletes the LangSmith project and annotation queue
+entirely (clears all traces and Engine's per-project issue state). After a full reset, re-run
 `python -m scripts.setup` before the next demo to recreate the project,
 dataset, and online evaluators from scratch.
 
@@ -44,7 +46,7 @@ def reset_dataset() -> None:
     from langsmith import Client
     from evals.dataset import EXAMPLES, TOOL_ADHERENCE_EXAMPLES
 
-    print(f"\n[1/3] Resetting demo datasets to canonical seeds...")
+    print(f"\n[1/4] Resetting demo datasets to canonical seeds...")
     ls_client = Client()
 
     for name, examples in (
@@ -80,7 +82,7 @@ def delete_ci_experiments() -> None:
     """
     from langsmith import Client
 
-    print(f"\n[2/3] Removing CI/Engine experiments (keeping baseline seeds)...")
+    print(f"\n[2/4] Removing CI/Engine experiments (keeping baseline seeds)...")
     ls_client = Client()
     total_deleted = 0
     total_kept = 0
@@ -121,7 +123,7 @@ def delete_engine_evaluators(api_key: str) -> None:
     """
     from langsmith import Client
 
-    print(f"\n[3/3] Removing Engine-added online evaluators...")
+    print(f"\n[3/4] Removing Engine-added online evaluators...")
 
     try:
         with open(".demo_state.json") as f:
@@ -167,6 +169,36 @@ def delete_engine_evaluators(api_key: str) -> None:
         print("  No Engine-added evaluators found.")
     else:
         print(f"  Deleted {deleted} Engine-added evaluator(s).")
+
+
+# ── 4. Reset the annotation queue ──────────────────────────────────────────────
+
+def reset_annotation_queue() -> None:
+    """Empty the demo's annotation queue and re-seed it with traces to review.
+
+    Reviewing a run in the queue marks it done and removes it from the pending
+    list, so after a demo the queue is drained. Like reset_dataset(), this
+    clears whatever is left and re-seeds from the same source setup.py uses.
+    Feedback left on the reviewed runs stays on the traces — only the queue
+    membership is reset.
+    """
+    from langsmith import Client
+    from scripts.setup import (
+        ANNOTATION_QUEUE_NAME, get_or_create_annotation_queue, seed_annotation_queue,
+    )
+
+    print(f"\n[4/4] Resetting annotation queue '{ANNOTATION_QUEUE_NAME}'...")
+    ls_client = Client()
+    try:
+        queue = get_or_create_annotation_queue(ls_client)
+        stale = list(ls_client.list_runs_from_annotation_queue(queue.id))
+        for run in stale:
+            ls_client.delete_run_from_annotation_queue(queue.id, run_id=run.id)
+        if stale:
+            print(f"  Cleared {len(stale)} run(s) from the queue.")
+        seed_annotation_queue(ls_client, queue.id)
+    except Exception as e:
+        print(f"  Annotation queue reset failed (non-fatal): {e}")
 
 
 # ── Optional: delete the entire LangSmith project ─────────────────────────────
@@ -253,7 +285,24 @@ def delete_project() -> None:
                     if not any(s in str(e).lower() for s in ("not found", "404")):
                         print(f"  {repo_type} delete failed for '{handle}': {e}")
 
-    # Clear the saved run-rule IDs from state — those IDs no longer exist
+    # 4. Annotation queues — workspace-level, so deleting the project leaves
+    # them behind. Scoped to this presenter with the same `chat-lc-lite-*` +
+    # `-<presenter>` match used for datasets and Hub repos above.
+    print(f"\n[*] Deleting annotation queues (presenter '{DEMO_PRESENTER}')...")
+    from scripts.setup import ANNOTATION_QUEUE_NAME
+    for q in ls_client.list_annotation_queues():
+        mine = q.name == ANNOTATION_QUEUE_NAME or (
+            q.name.startswith("chat-lc-lite-") and q.name.endswith(presenter_suffix)
+        )
+        if not mine:
+            continue
+        try:
+            ls_client.delete_annotation_queue(q.id)
+            print(f"  Deleted annotation queue '{q.name}'.")
+        except Exception as e:
+            print(f"  Annotation queue delete failed for '{q.name}': {e}")
+
+    # Clear the saved run-rule / queue IDs from state — those IDs no longer exist
     try:
         os.remove(".demo_state.json")
         print("  Removed stale .demo_state.json.")
@@ -272,7 +321,9 @@ def reset_main_to_baseline() -> None:
     fork-vs-upstream design, the tag lives in the same repo — no external
     upstream needed.
     """
-    print(f"\n[4/4] Resetting main branch to the 'baseline' tag...")
+    # Not part of the numbered sequence: this runs in both the standard and
+    # --full paths, so a fixed step number would be wrong in one of them.
+    print(f"\n[*] Resetting main branch to the 'baseline' tag...")
 
     # Get the repo from origin URL
     result = subprocess.run(
@@ -381,6 +432,7 @@ def main():
         reset_dataset()
         delete_ci_experiments()
         delete_engine_evaluators(api_key)
+        reset_annotation_queue()
         reset_context_hub()
     reset_main_to_baseline()
 
